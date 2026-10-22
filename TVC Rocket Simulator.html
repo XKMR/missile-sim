@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TVC Rocket Simulator</title>
+<style>
+:root{--bg:#eef2f6;--panel:#fffffff0;--ink:#14202b;--mut:#5b6b7a;--line:#cfd8e0;--acc:#d9480f;--sky1:#6aa9de;--sky2:#cfe6f7;--gnd:#5d7a4a;--grid:rgba(0,0,0,.1);--smoke:70,80,90;--hudbg:rgba(255,255,255,.72);--hudink:#14202b;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0b1118;--panel:#111a24f0;--ink:#dbe6f0;--mut:#8fa3b5;--line:#243342;--acc:#ff8a4c;--sky1:#050a14;--sky2:#14263d;--gnd:#1d2a1f;--grid:rgba(255,255,255,.08);--smoke:200,205,215;--hudbg:rgba(10,16,24,.72);--hudink:#dbe6f0}}
+:root[data-theme="dark"]{--bg:#0b1118;--panel:#111a24f0;--ink:#dbe6f0;--mut:#8fa3b5;--line:#243342;--acc:#ff8a4c;--sky1:#050a14;--sky2:#14263d;--gnd:#1d2a1f;--grid:rgba(255,255,255,.08);--smoke:200,205,215;--hudbg:rgba(10,16,24,.72);--hudink:#dbe6f0}
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px system-ui,-apple-system,Segoe UI,sans-serif;display:flex;flex-direction:column;overflow:hidden}
+#stage{flex:1;min-height:0;position:relative}
+canvas{width:100%;height:100%;display:block}
+#bar{display:flex;gap:16px;align-items:center;padding:8px 12px;background:var(--panel);border-top:1px solid var(--line);overflow-x:auto;white-space:nowrap}
+button{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--acc)}button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+.q{display:flex;flex-direction:column;gap:2px;min-width:120px;font-size:11px;color:var(--mut)}
+.q output{color:var(--ink)}input[type=range]{width:100%;accent-color:var(--acc)}
+#panel{position:fixed;top:env(safe-area-inset-top,0px);right:0;bottom:0;width:min(340px,100vw);background:var(--panel);border-left:1px solid var(--line);transform:translateX(100%);transition:transform .2s;overflow-y:auto;padding:12px 14px;z-index:5}
+#panel.open{transform:none}
+#panel h2{margin:0;font-size:15px}#panel h3{margin:16px 0 4px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--acc)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:6px}
+.f{display:grid;grid-template-columns:1fr auto;gap:0 8px;margin:6px 0;color:var(--mut)}.f input{grid-column:1/3}.f output{color:var(--ink)}
+.note{font-size:11px;color:var(--mut);margin-top:12px;line-height:1.4}
+</style></head><body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="bar"></div>
+<aside id="panel"><div class="top"><h2>Settings</h2><span><button id="defs">Defaults</button> <button id="close">Close</button></span></div><div id="list"></div>
+<p class="note">↻ settings take effect on the next reset. Everything else changes live. Mouse wheel zooms, Space pauses, R resets.</p></aside>
+<script>
+// [key,label,min,max,step,default,unit,flag] ; q = in quick bar
+const S=[
+['Motor'],
+['boostForce','Thrust',0,10000,50,4000,'N','q'],
+['boostTime','Burn time ↻',1,40,.5,10,'s'],
+['fuelMass','Fuel mass ↻',0,200,1,60,'kg'],
+['emptyMass','Dry mass ↻',5,200,1,20,'kg'],
+['TVC control'],
+['tvcGain','TVC gain',-50,50,.5,7,'×10⁻⁵ °/(m/s)²','q'],
+['tvcMax','TVC max angle',0,45,.5,20,'°','q'],
+['tvcStart','TVC start speed',0,400,5,100,'m/s'],
+['tvcCutoff','TVC cutoff time',0,60,.5,9,'s'],
+['torqueMult','TVC torque ×',0,60,.5,20,''],
+['Aerodynamics'],
+['drag','Drag coefficient',0,.02,.0005,.005,'','q'],
+['liftCoeff','Lift coefficient',0,3,.05,1,''],
+['aeroMult','Aero stiffness ×',0,20,.5,5,''],
+['dampingRatio','Pitch damping ratio',0,2,.05,.7,''],
+['wingArea','Wing area',0,30,.5,10,'m²'],
+['Body and world'],
+['bodyLength','Body length',1,10,.1,3,'m'],
+['momentArm','Moment arm',.2,5,.1,1.5,'m'],
+['gravity','Gravity',0,20,.1,9.8,'m/s²'],
+['startAngle','Launch angle ↻',0,90,1,45,'°'],
+['Simulation and view'],
+['simSpeed','Sim speed',.1,5,.1,1,'×','q'],
+['stepTime','Time step',.005,.1,.005,.03,'s'],
+['zoomExp','Zoom (log10 px/m)',-1.5,1.5,.05,.5,'','q'],
+['smokeLife','Smoke lifetime',1,30,1,8,'s'],
+['smokeAmt','Smoke density',0,3,.1,1,'']
+];
+const P={},ui={},meta={};
+S.forEach(r=>{if(r.length>1){P[r[0]]=r[5];meta[r[0]]=r;ui[r[0]]=[]}});
+const fmt=(k,v)=>{const m=meta[k],d=(String(m[4]).split('.')[1]||'').length;return (+v).toFixed(d)+(m[6]?' '+m[6]:'')};
+function set(k,v){P[k]=+v;for(const e of ui[k]){e.r.value=v;e.o.textContent=fmt(k,v)}}
+function mk(row,host,cls){const k=row[0],w=document.createElement('label');w.className=cls;
+ w.innerHTML='<span>'+row[1]+'</span><output></output><input type="range" min="'+row[2]+'" max="'+row[3]+'" step="'+row[4]+'">';
+ const r=w.querySelector('input'),o=w.querySelector('output');ui[k].push({r,o});
+ r.oninput=()=>set(k,r.value);host.appendChild(w);set(k,P[k])}
+const bar=document.getElementById('bar'),list=document.getElementById('list');
+function btn(t,f,c){const b=document.createElement('button');b.textContent=t;b.onclick=f;if(c)b.className=c;bar.appendChild(b);return b}
+const pauseB=btn('Pause',()=>togglePause());btn('Reset',()=>reset(),'p');btn('Settings',()=>panel.classList.toggle('open'));
+S.forEach(r=>{if(r.length>1&&r[7]==='q')mk(r,bar,'q')});
+const panel=document.getElementById('panel');
+S.forEach(r=>{if(r.length===1){const h=document.createElement('h3');h.textContent=r[0];list.appendChild(h)}else mk(r,list,'f')});
+document.getElementById('close').onclick=()=>panel.classList.remove('open');
+document.getElementById('defs').onclick=()=>{for(const k in meta)set(k,meta[k][5]);reset()};
+
+// ---------- simulation ----------
+let st,R,paused=false;const smoke=[];
+function reset(){R={emptyMass:P.emptyMass,fuelMass:P.fuelMass,boostTime:P.boostTime};
+ st={n:0,time:0,mass:R.emptyMass+R.fuelMass,burnRate:R.fuelMass/R.boostTime,booster:true,thrust:P.boostForce,stopTVC:false,cmd:0,AOA:0,G:0,E:0,dragM:P.drag,over:false,
+ Fd:{x:0,y:0,total:0},a:{x:0,y:0},pos:{x:0,y:1,th:P.startAngle*Math.PI/180},vel:{x:0,y:1,total:0,th:0}};
+ smoke.length=0;acc=0}
+function togglePause(){paused=!paused;pauseB.textContent=paused?'Resume':'Pause'}
+
+function step(s,t){
+ const pos=s.pos,V=s.vel,m=s.mass,Ft=s.thrust,Fd=s.Fd,a=s.a;
+ const Ftx=Ft*Math.cos(pos.th),Fty=Ft*Math.sin(pos.th);
+ s.AOA=Math.atan2(V.y,V.x)-pos.th;const AOA=s.AOA;
+ const k=P.wingArea*s.dragM*V.total**2*P.aeroMult;
+ const I=Math.max(m*P.bodyLength**2/12,1e-3);
+ const tvcT=-Ft*Math.sin(s.cmd)*P.momentArm*P.torqueMult;
+ const c=2*P.dampingRatio*Math.sqrt(I*k);
+ const lift=P.liftCoeff*P.wingArea*s.dragM*V.total**2*Math.sin(AOA);
+ const kEff=k*Math.max(Math.cos(AOA),0),gamma=Math.atan2(V.y,V.x);
+ V.th=(V.th+(t/I)*(k*Math.sin(AOA)+tvcT))/(1+(c/I)*t+(kEff/I)*t*t);
+ pos.th+=V.th*t;
+ a.x=(Ftx+Fd.x+lift*Math.sin(gamma))/m;V.x+=a.x*t;pos.x+=V.x*t;
+ a.y=(Fty+Fd.y-lift*Math.cos(gamma))/m-P.gravity;V.y+=a.y*t;pos.y+=V.y*t;
+}
+function tick(){
+ const s=st,t=P.stepTime,V=s.vel;
+ if(s.booster&&s.time>=R.boostTime)s.booster=false;
+ s.thrust=s.booster?P.boostForce:0;
+ if(V.total>=P.tvcStart&&!s.stopTVC){
+  s.cmd=(-P.tvcGain*1e-5*V.total**2*Math.PI)/180;
+  const mx=P.tvcMax*Math.PI/180;if(Math.abs(s.cmd)>mx)s.cmd=Math.sign(s.cmd)*mx}
+ if(!s.stopTVC&&s.time>=P.tvcCutoff){s.cmd=0;s.stopTVC=true}
+ s.G=Math.hypot(s.a.x,s.a.y)/10;
+ if(s.booster)s.mass-=t*s.burnRate;
+ V.total=Math.hypot(V.x,V.y);const v2=V.total*V.total;
+ s.dragM=P.drag*Math.pow(1-1e-4,s.pos.y);
+ s.Fd.x=-s.dragM*V.total*V.x;s.Fd.y=-s.dragM*V.total*V.y;s.Fd.total=Math.hypot(s.Fd.x,s.Fd.y);
+ step(s,t);
+ s.E=s.mass*v2/2;s.n++;s.time+=t;
+ if(s.pos.y<0)s.over=true;
+ // smoke
+ let j=0;for(const q of smoke){q.age+=t;if(q.age<P.smokeLife){q.x+=q.vx*t;q.y+=q.vy*t;q.vx*=1-2*t;q.vy=q.vy*(1-2*t)+1.5*t;smoke[j++]=q}}smoke.length=j;
+ if(s.thrust>0){for(let n=Math.floor(P.smokeAmt+Math.random());n>0;n--){
+  const th=s.pos.th,ea=th+Math.PI+s.cmd+(Math.random()-.5)*.3,sp=8+Math.random()*14;
+  smoke.push({x:s.pos.x-Math.cos(th)*P.bodyLength/2,y:s.pos.y-Math.sin(th)*P.bodyLength/2,vx:V.x*.05+Math.cos(ea)*sp,vy:V.y*.05+Math.sin(ea)*sp,age:0,r:.4+Math.random()*.4})}}
+ if(smoke.length>3000)smoke.splice(0,smoke.length-3000);
+}
+
+// ---------- rendering ----------
+const cv=document.getElementById('cv'),cx=cv.getContext('2d');let C={};
+function colors(){const cs=getComputedStyle(document.documentElement);for(const k of['sky1','sky2','gnd','grid','smoke','hudbg','hudink','mut','acc','line'])C[k]=cs.getPropertyValue('--'+k).trim()}
+function rs(){const r=devicePixelRatio||1;cv.width=cv.clientWidth*r;cv.height=cv.clientHeight*r;cx.setTransform(r,0,0,r,0,0)}
+new ResizeObserver(rs).observe(cv);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',colors);
+
+function flame(len,wid,col){cx.fillStyle=col;cx.beginPath();cx.moveTo(0,-wid);cx.quadraticCurveTo(-len*.5,-wid,-len,0);cx.quadraticCurveTo(-len*.5,wid,0,wid);cx.closePath();cx.fill()}
+function draw(){
+ const W=cv.clientWidth,H=cv.clientHeight,z=10**P.zoomExp,s=st,p=s.pos;
+ const X=x=>W/2+(x-p.x)*z,Y=y=>H/2-(y-p.y)*z;
+ let g=cx.createLinearGradient(0,0,0,H);g.addColorStop(0,C.sky1);g.addColorStop(1,C.sky2);cx.fillStyle=g;cx.fillRect(0,0,W,H);
+ const sp=10**Math.ceil(Math.log10(70/z)),gy=Y(0);
+ cx.strokeStyle=C.grid;cx.lineWidth=1;cx.beginPath();
+ for(let x=Math.floor((p.x-W/2/z)/sp)*sp;x<=p.x+W/2/z;x+=sp){const sx=Math.round(X(x))+.5;cx.moveTo(sx,0);cx.lineTo(sx,H)}
+ cx.font='10px ui-monospace,monospace';const lab=[];
+ for(let y=Math.max(0,Math.floor((p.y-H/2/z)/sp)*sp);y<=p.y+H/2/z;y+=sp){const sy=Math.round(Y(y))+.5;cx.moveTo(0,sy);cx.lineTo(W,sy);lab.push([y,sy])}
+ cx.stroke();cx.fillStyle=C.mut;for(const[y,sy]of lab)cx.fillText(y+' m',4,sy-2);
+ if(gy<H){const t0=Math.max(gy,0);cx.fillStyle=C.gnd;cx.fillRect(0,t0,W,H-t0)}
+ // smoke
+ for(const q of smoke){const sx=X(q.x),sy=Y(q.y);if(sx<-50||sx>W+50||sy<-50||sy>H+50)continue;
+  const f=q.age/P.smokeLife,r=Math.max((q.r+q.age*.6)*z,1.5);
+  cx.fillStyle='rgba('+C.smoke+','+(.5*(1-f)).toFixed(3)+')';cx.beginPath();cx.arc(sx,sy,r,0,6.283);cx.fill()}
+ // rocket
+ const L=Math.max(P.bodyLength*z,40),w=L*.1;
+ cx.save();cx.translate(W/2,H/2);cx.rotate(-p.th);
+ cx.save();cx.translate(-L/2,0);cx.rotate(-s.cmd);
+ if(s.thrust>0){const fl=Math.min(L*.9*s.thrust/4000,L*3)*(.85+.3*Math.random());
+  flame(fl,w*.9,'#e8590c');flame(fl*.7,w*.65,'#ffa94d');flame(fl*.4,w*.35,'#fff3bf')}
+ cx.fillStyle='#5c6b7a';cx.beginPath();cx.moveTo(0,-w*.6);cx.lineTo(-L*.07,-w*.95);cx.lineTo(-L*.07,w*.95);cx.lineTo(0,w*.6);cx.closePath();cx.fill();
+ cx.restore();
+ cx.lineWidth=1.2;cx.strokeStyle='#243342';
+ cx.fillStyle=C.acc;cx.beginPath();cx.moveTo(-L/2+L*.2,w);cx.lineTo(-L/2-L*.05,w*2.5);cx.lineTo(-L/2,w);cx.moveTo(-L/2+L*.2,-w);cx.lineTo(-L/2-L*.05,-w*2.5);cx.lineTo(-L/2,-w);cx.fill();cx.stroke();
+ cx.fillStyle='#f2f5f8';cx.beginPath();cx.rect(-L/2,-w,L*.78,w*2);cx.fill();cx.stroke();
+ cx.fillStyle=C.acc;cx.beginPath();cx.moveTo(L*.28,-w);cx.quadraticCurveTo(L*.42,-w*.8,L/2,0);cx.quadraticCurveTo(L*.42,w*.8,L*.28,w);cx.closePath();cx.fill();cx.stroke();
+ cx.restore();
+ // HUD
+ const r=n=>(Math.round(n*10)/10).toString(),d=57.2958;
+ const rows=[['t',r(s.time)+' s'],['alt',r(p.y)+' m'],['x',r(p.x)+' m'],['V',r(V0(s))+' m/s'],['Ft',r(s.thrust)+' N'],['Fd',r(s.Fd.total)+' N'],['E',r(s.E)+' J'],['m',r(s.mass)+' kg'],['pitch',r(p.th*d)+'°'],['AOA',r(s.AOA*d)+'°'],['cmd',r(s.cmd*d)+'°'],['G',r(s.G)],['booster',s.booster?'ON':'off']];
+ cx.fillStyle=C.hudbg;cx.fillRect(8,8,176,rows.length*16+10);cx.font='12px ui-monospace,monospace';cx.fillStyle=C.hudink;
+ rows.forEach((q,i)=>{cx.textAlign='left';cx.fillText(q[0],16,25+i*16);cx.textAlign='right';cx.fillText(q[1],176,25+i*16)});cx.textAlign='left';
+ if(s.over||paused){cx.font='600 20px system-ui,sans-serif';cx.textAlign='center';cx.fillStyle=C.hudink;cx.fillText(s.over?'Ground impact (press R to reset)':'Paused',W/2,H*.18);cx.textAlign='left'}
+}
+const V0=s=>Math.hypot(s.vel.x,s.vel.y);
+
+// ---------- main loop ----------
+let last=performance.now(),acc=0,fc=0;
+function frame(now){const dt=Math.min((now-last)/1000,.1);last=now;
+ if(!(fc++%60))colors();
+ if(!paused&&!st.over){acc+=dt*P.simSpeed;let k=0;while(acc>=P.stepTime&&k<400){tick();acc-=P.stepTime;k++;if(st.over)break}if(k>=400)acc=0}
+ draw();requestAnimationFrame(frame)}
+cv.addEventListener('wheel',e=>{e.preventDefault();set('zoomExp',Math.min(1.5,Math.max(-1.5,P.zoomExp-e.deltaY*.001)))},{passive:false});
+addEventListener('keydown',e=>{if(e.target!==document.body)return;if(e.key==='r'||e.key==='R')reset();if(e.key===' '){e.preventDefault();togglePause()}});
+colors();rs();reset();requestAnimationFrame(frame);
+</script></body></html>
